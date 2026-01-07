@@ -15,6 +15,15 @@ from fastapi import FastAPI, File, UploadFile, Query, HTTPException
 from fastapi.responses import JSONResponse
 from ultralytics import YOLO
 
+from analytics import (
+    compute_overcrowding_alerts,
+    compute_trend_analysis,
+    compute_presence_heatmap,
+    compute_movement_heatmap,
+    compute_time_based_heatmap,
+    compute_all_analytics,
+)
+
 # Initialize FastAPI app
 app = FastAPI(
     title="YOLO11 Video Tracking API",
@@ -33,14 +42,23 @@ DEFAULT_CONFIDENCE = 0.5
 # Person class ID in COCO dataset
 PERSON_CLASS_ID = 0
 
+# Default analytics parameters
+DEFAULT_MAX_PERSONS = 10
+DEFAULT_BUCKET_SECONDS = 1.0
+DEFAULT_HEATMAP_SCALE = 0.1
+
 
 @app.get("/")
 async def root():
     """Root endpoint with API information."""
     return {
-        "message": "YOLO11 Video Tracking API",
+        "message": "YOLO11 Video Tracking API with Analytics",
         "endpoints": {
-            "/track": "POST - Upload video for person tracking",
+            "/track": "POST - Basic video tracking (returns frame-by-frame detections)",
+            "/analyze": "POST - Full analytics (tracking + overcrowding + trends + heatmaps)",
+            "/analyze/overcrowding": "POST - Overcrowding alerts only",
+            "/analyze/trends": "POST - Trend analysis only",
+            "/analyze/heatmaps": "POST - Heat maps only (presence + movement + time-based)",
             "/health": "GET - Health check",
         },
     }
@@ -249,8 +267,315 @@ def process_video(video_path: str, confidence: float) -> dict:
     return results_dict
 
 
+# =============================================================================
+# Analytics Endpoints
+# =============================================================================
+
+
+async def _process_video_for_analytics(
+    video: UploadFile,
+    confidence: float,
+) -> tuple:
+    """
+    Helper function to process video and return tracking results with temp path handling.
+
+    Returns:
+        Tuple of (tracking_results, video_filename)
+    """
+    allowed_extensions = {".mp4", ".avi", ".mov", ".mkv", ".webm", ".flv", ".wmv"}
+    file_ext = os.path.splitext(video.filename)[1].lower()
+
+    if file_ext not in allowed_extensions:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid file type. Allowed types: {', '.join(allowed_extensions)}",
+        )
+
+    temp_dir = tempfile.mkdtemp()
+    temp_video_path = os.path.join(temp_dir, video.filename)
+
+    try:
+        with open(temp_video_path, "wb") as buffer:
+            shutil.copyfileobj(video.file, buffer)
+
+        tracking_results = process_video(temp_video_path, confidence)
+        return tracking_results, video.filename
+
+    finally:
+        if os.path.exists(temp_dir):
+            shutil.rmtree(temp_dir)
+
+
+@app.post("/analyze")
+async def analyze_video(
+    video: UploadFile = File(..., description="Video file to process"),
+    confidence: Optional[float] = Query(
+        default=DEFAULT_CONFIDENCE,
+        ge=0.0,
+        le=1.0,
+        description="Minimum confidence threshold for detections",
+    ),
+    max_persons: Optional[int] = Query(
+        default=DEFAULT_MAX_PERSONS,
+        ge=1,
+        description="Maximum persons before overcrowding alert",
+    ),
+    bucket_seconds: Optional[float] = Query(
+        default=DEFAULT_BUCKET_SECONDS,
+        ge=0.1,
+        description="Time bucket size in seconds for time-based heatmap",
+    ),
+    heatmap_scale: Optional[float] = Query(
+        default=DEFAULT_HEATMAP_SCALE,
+        ge=0.01,
+        le=1.0,
+        description="Scale factor for heatmap resolution (0.1 = 10% of original)",
+    ),
+):
+    """
+    Full analytics endpoint: tracking + overcrowding + trends + heatmaps.
+
+    Returns all tracking data plus comprehensive analytics.
+    """
+    try:
+        tracking_results, video_filename = await _process_video_for_analytics(
+            video, confidence
+        )
+
+        frames_data = tracking_results.get("frames", [])
+        video_metadata = tracking_results.get("video_metadata", {})
+
+        analytics = compute_all_analytics(
+            frames_data=frames_data,
+            video_metadata=video_metadata,
+            max_persons=max_persons,
+            bucket_seconds=bucket_seconds,
+            heatmap_scale=heatmap_scale,
+        )
+
+        return JSONResponse(
+            content={
+                "status": "success",
+                "video_name": video_filename,
+                "confidence_threshold": confidence,
+                "total_frames": len(frames_data),
+                "results": tracking_results,
+                "analytics": analytics,
+            }
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error analyzing video: {str(e)}",
+        )
+
+
+@app.post("/analyze/overcrowding")
+async def analyze_overcrowding(
+    video: UploadFile = File(..., description="Video file to process"),
+    confidence: Optional[float] = Query(
+        default=DEFAULT_CONFIDENCE,
+        ge=0.0,
+        le=1.0,
+        description="Minimum confidence threshold for detections",
+    ),
+    max_persons: Optional[int] = Query(
+        default=DEFAULT_MAX_PERSONS,
+        ge=1,
+        description="Maximum persons before overcrowding alert",
+    ),
+):
+    """
+    Overcrowding analysis endpoint.
+
+    Returns tracking data with overcrowding alerts including:
+    - Time ranges (start/end timestamps)
+    - Duration of each event
+    - Peak count during overcrowding
+    """
+    try:
+        tracking_results, video_filename = await _process_video_for_analytics(
+            video, confidence
+        )
+
+        frames_data = tracking_results.get("frames", [])
+        video_metadata = tracking_results.get("video_metadata", {})
+        fps = video_metadata.get("fps", 30)
+
+        overcrowding_alerts = compute_overcrowding_alerts(
+            frames_data=frames_data,
+            max_persons=max_persons,
+            fps=fps,
+        )
+
+        return JSONResponse(
+            content={
+                "status": "success",
+                "video_name": video_filename,
+                "confidence_threshold": confidence,
+                "total_frames": len(frames_data),
+                "video_metadata": video_metadata,
+                "tracking_summary": tracking_results.get("tracking_summary", {}),
+                "overcrowding_alerts": overcrowding_alerts,
+            }
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error analyzing overcrowding: {str(e)}",
+        )
+
+
+@app.post("/analyze/trends")
+async def analyze_trends(
+    video: UploadFile = File(..., description="Video file to process"),
+    confidence: Optional[float] = Query(
+        default=DEFAULT_CONFIDENCE,
+        ge=0.0,
+        le=1.0,
+        description="Minimum confidence threshold for detections",
+    ),
+):
+    """
+    Trend analysis endpoint.
+
+    Returns person count statistics over time:
+    - Min/max/average person count
+    - Standard deviation
+    - Person count timeline (sampled for efficiency)
+    """
+    try:
+        tracking_results, video_filename = await _process_video_for_analytics(
+            video, confidence
+        )
+
+        frames_data = tracking_results.get("frames", [])
+        video_metadata = tracking_results.get("video_metadata", {})
+        fps = video_metadata.get("fps", 30)
+
+        trend_analysis = compute_trend_analysis(
+            frames_data=frames_data,
+            fps=fps,
+        )
+
+        return JSONResponse(
+            content={
+                "status": "success",
+                "video_name": video_filename,
+                "confidence_threshold": confidence,
+                "total_frames": len(frames_data),
+                "video_metadata": video_metadata,
+                "tracking_summary": tracking_results.get("tracking_summary", {}),
+                "trend_analysis": trend_analysis,
+            }
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error analyzing trends: {str(e)}",
+        )
+
+
+@app.post("/analyze/heatmaps")
+async def analyze_heatmaps(
+    video: UploadFile = File(..., description="Video file to process"),
+    confidence: Optional[float] = Query(
+        default=DEFAULT_CONFIDENCE,
+        ge=0.0,
+        le=1.0,
+        description="Minimum confidence threshold for detections",
+    ),
+    bucket_seconds: Optional[float] = Query(
+        default=DEFAULT_BUCKET_SECONDS,
+        ge=0.1,
+        description="Time bucket size in seconds for time-based heatmap",
+    ),
+    heatmap_scale: Optional[float] = Query(
+        default=DEFAULT_HEATMAP_SCALE,
+        ge=0.01,
+        le=1.0,
+        description="Scale factor for heatmap resolution",
+    ),
+):
+    """
+    Heat maps analysis endpoint.
+
+    Returns:
+    - Presence heatmap (where people stand)
+    - Movement heatmap (where people move through)
+    - Time-based cumulative heatmap with bucket metadata
+    """
+    try:
+        tracking_results, video_filename = await _process_video_for_analytics(
+            video, confidence
+        )
+
+        frames_data = tracking_results.get("frames", [])
+        video_metadata = tracking_results.get("video_metadata", {})
+        fps = video_metadata.get("fps", 30)
+        width = video_metadata.get("resolution", {}).get("width", 1920)
+        height = video_metadata.get("resolution", {}).get("height", 1080)
+
+        presence_heatmap = compute_presence_heatmap(
+            frames_data=frames_data,
+            width=width,
+            height=height,
+            scale_factor=heatmap_scale,
+        )
+
+        movement_heatmap = compute_movement_heatmap(
+            frames_data=frames_data,
+            width=width,
+            height=height,
+            scale_factor=heatmap_scale,
+        )
+
+        time_based_heatmap = compute_time_based_heatmap(
+            frames_data=frames_data,
+            width=width,
+            height=height,
+            fps=fps,
+            bucket_seconds=bucket_seconds,
+            scale_factor=heatmap_scale,
+        )
+
+        return JSONResponse(
+            content={
+                "status": "success",
+                "video_name": video_filename,
+                "confidence_threshold": confidence,
+                "total_frames": len(frames_data),
+                "video_metadata": video_metadata,
+                "tracking_summary": tracking_results.get("tracking_summary", {}),
+                "heatmaps": {
+                    "presence": presence_heatmap,
+                    "movement": movement_heatmap,
+                    "time_based": time_based_heatmap,
+                },
+            }
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error generating heatmaps: {str(e)}",
+        )
+
+
 if __name__ == "__main__":
     import uvicorn
 
     # Run the server
     uvicorn.run(app, host="0.0.0.0", port=8000)
+

@@ -10,6 +10,10 @@ ultralytics>=8.3.0  # YOLO11 support
 opencv-python>=4.8.0
 numpy>=1.24.0
 
+# Visualization (for test client)
+matplotlib>=3.7.0  # For graphs and charts
+requests>=2.31.0  # For test client API calls
+
 # Optional: For better performance
 # torch>=2.0.0  # Usually installed with ultralytics
 # torchvision>=0.15.0
