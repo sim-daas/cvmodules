@@ -1,0 +1,15 @@
+# YOLO11 Video Tracking API Dependencies
+
+# Core dependencies
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+python-multipart>=0.0.6  # Required for file uploads in FastAPI
+
+# Computer Vision & ML
+ultralytics>=8.3.0  # YOLO11 support
+opencv-python>=4.8.0
+numpy>=1.24.0
+
+# Optional: For better performance
+# torch>=2.0.0  # Usually installed with ultralytics
+# torchvision>=0.15.0
