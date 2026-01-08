@@ -33,7 +33,7 @@ app = FastAPI(
 
 # Load YOLO11 model globally for efficiency
 # The model is loaded once at startup and reused for all requests
-MODEL_PATH = "yolo11m.pt"  # You can change to yolo11s.pt, yolo11m.pt, yolo11l.pt, yolo11x.pt for better accuracy
+MODEL_PATH = "yolo11l.pt"  # You can change to yolo11s.pt, yolo11m.pt, yolo11l.pt, yolo11x.pt for better accuracy
 model = YOLO(MODEL_PATH)
 
 # Default confidence threshold

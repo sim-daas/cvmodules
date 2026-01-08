@@ -10,6 +10,75 @@ This module contains functions for computing advanced analytics from tracking da
 
 from typing import Optional
 import numpy as np
+import cv2
+
+
+# Default ROI margins (pixels to exclude from edges)
+DEFAULT_ROI_MARGIN_TOP = 50
+DEFAULT_ROI_MARGIN_BOTTOM = 30
+DEFAULT_ROI_MARGIN_LEFT = 40
+DEFAULT_ROI_MARGIN_RIGHT = 40
+
+# Default heatmap blur kernel size (must be odd number)
+DEFAULT_HEATMAP_BLUR_SIZE = 27
+
+
+def is_detection_in_roi(
+    detection: dict,
+    frame_width: int,
+    frame_height: int,
+    margin_top: int = DEFAULT_ROI_MARGIN_TOP,
+    margin_bottom: int = DEFAULT_ROI_MARGIN_BOTTOM,
+    margin_left: int = DEFAULT_ROI_MARGIN_LEFT,
+    margin_right: int = DEFAULT_ROI_MARGIN_RIGHT,
+) -> bool:
+    """
+    Check if a detection's center is within the valid ROI.
+
+    Args:
+        detection: Detection dictionary with bbox_center
+        frame_width: Video frame width
+        frame_height: Video frame height
+        margin_top: Pixels to exclude from top
+        margin_bottom: Pixels to exclude from bottom
+        margin_left: Pixels to exclude from left
+        margin_right: Pixels to exclude from right
+
+    Returns:
+        True if detection center is within ROI
+    """
+    bbox_center = detection.get("bbox_center", {})
+    x = bbox_center.get("x", 0)
+    y = bbox_center.get("y", 0)
+
+    # Define ROI boundaries
+    roi_left = margin_left
+    roi_right = frame_width - margin_right
+    roi_top = margin_top
+    roi_bottom = frame_height - margin_bottom
+
+    return roi_left <= x <= roi_right and roi_top <= y <= roi_bottom
+
+
+def apply_heatmap_blur(heatmap: np.ndarray, blur_size: int = DEFAULT_HEATMAP_BLUR_SIZE) -> np.ndarray:
+    """
+    Apply Gaussian blur to inflate/spread the heatmap for better visualization.
+
+    Args:
+        heatmap: 2D numpy array with heat values
+        blur_size: Size of the Gaussian kernel (must be odd)
+
+    Returns:
+        Blurred heatmap
+    """
+    # Ensure blur_size is odd
+    if blur_size % 2 == 0:
+        blur_size += 1
+
+    # Apply Gaussian blur
+    blurred = cv2.GaussianBlur(heatmap.astype(np.float32), (blur_size, blur_size), 0)
+
+    return blurred
 
 
 def compute_overcrowding_alerts(
@@ -143,6 +212,9 @@ def compute_presence_heatmap(
     width: int,
     height: int,
     scale_factor: float = 0.1,
+    blur_size: int = DEFAULT_HEATMAP_BLUR_SIZE,
+    roi_margin_top: int = DEFAULT_ROI_MARGIN_TOP,
+    roi_margin_bottom: int = DEFAULT_ROI_MARGIN_BOTTOM,
 ) -> dict:
     """
     Compute presence heat map showing where people stand/exist.
@@ -154,6 +226,9 @@ def compute_presence_heatmap(
         width: Video width in pixels
         height: Video height in pixels
         scale_factor: Scale factor to reduce heatmap size (0.1 = 10% of original)
+        blur_size: Gaussian blur kernel size for heatmap inflation
+        roi_margin_top: Pixels to exclude from top edge
+        roi_margin_bottom: Pixels to exclude from bottom edge
 
     Returns:
         Dictionary containing presence heat map data
@@ -167,6 +242,11 @@ def compute_presence_heatmap(
     for frame in frames_data:
         detections = frame.get("detections", [])
         for detection in detections:
+            # Filter by ROI
+            if not is_detection_in_roi(detection, width, height, 
+                                        roi_margin_top, roi_margin_bottom):
+                continue
+
             bbox_center = detection.get("bbox_center", {})
             x = bbox_center.get("x", 0)
             y = bbox_center.get("y", 0)
@@ -182,12 +262,15 @@ def compute_presence_heatmap(
             # Increment heat at this location
             heatmap[hy, hx] += 1
 
+    # Apply Gaussian blur to inflate the heatmap
+    heatmap_blurred = apply_heatmap_blur(heatmap, blur_size)
+
     # Normalize to 0-255 for visualization
-    max_val = heatmap.max()
+    max_val = heatmap_blurred.max()
     if max_val > 0:
-        heatmap_normalized = (heatmap / max_val * 255).astype(np.uint8)
+        heatmap_normalized = (heatmap_blurred / max_val * 255).astype(np.uint8)
     else:
-        heatmap_normalized = heatmap.astype(np.uint8)
+        heatmap_normalized = heatmap_blurred.astype(np.uint8)
 
     return {
         "heatmap": heatmap_normalized.tolist(),
@@ -201,6 +284,11 @@ def compute_presence_heatmap(
             "height": height,
         },
         "scale_factor": scale_factor,
+        "blur_size": blur_size,
+        "roi_margins": {
+            "top": roi_margin_top,
+            "bottom": roi_margin_bottom,
+        },
         "max_heat_value": int(max_val),
     }
 
@@ -210,6 +298,9 @@ def compute_movement_heatmap(
     width: int,
     height: int,
     scale_factor: float = 0.1,
+    blur_size: int = DEFAULT_HEATMAP_BLUR_SIZE,
+    roi_margin_top: int = DEFAULT_ROI_MARGIN_TOP,
+    roi_margin_bottom: int = DEFAULT_ROI_MARGIN_BOTTOM,
 ) -> dict:
     """
     Compute movement heat map showing where people move through.
@@ -221,6 +312,9 @@ def compute_movement_heatmap(
         width: Video width in pixels
         height: Video height in pixels
         scale_factor: Scale factor to reduce heatmap size
+        blur_size: Gaussian blur kernel size for heatmap inflation
+        roi_margin_top: Pixels to exclude from top edge
+        roi_margin_bottom: Pixels to exclude from bottom edge
 
     Returns:
         Dictionary containing movement heat map data
@@ -238,6 +332,11 @@ def compute_movement_heatmap(
         current_positions = {}
 
         for detection in detections:
+            # Filter by ROI
+            if not is_detection_in_roi(detection, width, height,
+                                        roi_margin_top, roi_margin_bottom):
+                continue
+
             track_id = detection.get("track_id")
             if track_id is None:
                 continue
@@ -267,12 +366,15 @@ def compute_movement_heatmap(
 
         prev_positions = current_positions
 
+    # Apply Gaussian blur to inflate the heatmap
+    heatmap_blurred = apply_heatmap_blur(heatmap, blur_size)
+
     # Normalize to 0-255
-    max_val = heatmap.max()
+    max_val = heatmap_blurred.max()
     if max_val > 0:
-        heatmap_normalized = (heatmap / max_val * 255).astype(np.uint8)
+        heatmap_normalized = (heatmap_blurred / max_val * 255).astype(np.uint8)
     else:
-        heatmap_normalized = heatmap.astype(np.uint8)
+        heatmap_normalized = heatmap_blurred.astype(np.uint8)
 
     return {
         "heatmap": heatmap_normalized.tolist(),
@@ -286,6 +388,11 @@ def compute_movement_heatmap(
             "height": height,
         },
         "scale_factor": scale_factor,
+        "blur_size": blur_size,
+        "roi_margins": {
+            "top": roi_margin_top,
+            "bottom": roi_margin_bottom,
+        },
         "max_heat_value": int(max_val),
     }
 
@@ -330,6 +437,9 @@ def compute_time_based_heatmap(
     fps: float,
     bucket_seconds: float = 1.0,
     scale_factor: float = 0.1,
+    blur_size: int = DEFAULT_HEATMAP_BLUR_SIZE,
+    roi_margin_top: int = DEFAULT_ROI_MARGIN_TOP,
+    roi_margin_bottom: int = DEFAULT_ROI_MARGIN_BOTTOM,
 ) -> dict:
     """
     Compute time-based heat map with presence data aggregated by time buckets.
@@ -341,6 +451,9 @@ def compute_time_based_heatmap(
         fps: Video frames per second
         bucket_seconds: Time bucket size in seconds
         scale_factor: Scale factor to reduce heatmap size
+        blur_size: Gaussian blur kernel size for heatmap inflation
+        roi_margin_top: Pixels to exclude from top edge
+        roi_margin_bottom: Pixels to exclude from bottom edge
 
     Returns:
         Dictionary containing cumulative heat map with time metadata
@@ -370,6 +483,11 @@ def compute_time_based_heatmap(
         for frame in bucket_frames:
             detections = frame.get("detections", [])
             for detection in detections:
+                # Filter by ROI
+                if not is_detection_in_roi(detection, width, height,
+                                            roi_margin_top, roi_margin_bottom):
+                    continue
+
                 bbox_center = detection.get("bbox_center", {})
                 x = bbox_center.get("x", 0)
                 y = bbox_center.get("y", 0)
@@ -382,12 +500,13 @@ def compute_time_based_heatmap(
                 bucket_heatmap[hy, hx] += 1
                 cumulative_heatmap[hy, hx] += 1
 
-        # Normalize bucket heatmap
-        bucket_max = bucket_heatmap.max()
+        # Apply blur and normalize bucket heatmap
+        bucket_blurred = apply_heatmap_blur(bucket_heatmap, blur_size)
+        bucket_max = bucket_blurred.max()
         if bucket_max > 0:
-            bucket_normalized = (bucket_heatmap / bucket_max * 255).astype(np.uint8)
+            bucket_normalized = (bucket_blurred / bucket_max * 255).astype(np.uint8)
         else:
-            bucket_normalized = bucket_heatmap.astype(np.uint8)
+            bucket_normalized = bucket_blurred.astype(np.uint8)
 
         time_buckets_data.append({
             "bucket_index": bucket_index,
@@ -398,12 +517,13 @@ def compute_time_based_heatmap(
             "heatmap": bucket_normalized.tolist(),
         })
 
-    # Normalize cumulative heatmap
-    max_val = cumulative_heatmap.max()
+    # Apply blur and normalize cumulative heatmap
+    cumulative_blurred = apply_heatmap_blur(cumulative_heatmap, blur_size)
+    max_val = cumulative_blurred.max()
     if max_val > 0:
-        cumulative_normalized = (cumulative_heatmap / max_val * 255).astype(np.uint8)
+        cumulative_normalized = (cumulative_blurred / max_val * 255).astype(np.uint8)
     else:
-        cumulative_normalized = cumulative_heatmap.astype(np.uint8)
+        cumulative_normalized = cumulative_blurred.astype(np.uint8)
 
     return {
         "bucket_seconds": bucket_seconds,

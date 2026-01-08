@@ -43,12 +43,43 @@ DEFAULT_BUCKET_SECONDS = 1.0
 DEFAULT_HEATMAP_SCALE = 0.1
 DEFAULT_OUTPUT_DIR = "output"
 
+# ROI margins - must match analytics.py for consistent filtering
+DEFAULT_ROI_MARGIN_TOP = 50
+DEFAULT_ROI_MARGIN_BOTTOM = 30
+DEFAULT_ROI_MARGIN_LEFT = 40
+DEFAULT_ROI_MARGIN_RIGHT = 40
+
 # Visualization colors (BGR format)
 BOX_COLOR = (0, 255, 0)  # Green
 TEXT_COLOR = (255, 255, 255)  # White
 TEXT_BG_COLOR = (0, 255, 0)  # Green background for text
 FRAME_INFO_COLOR = (0, 255, 255)  # Yellow for frame info
 OVERCROWDING_COLOR = (0, 0, 255)  # Red for overcrowding
+ROI_RECT_COLOR = (255, 255, 0)  # Cyan for ROI rectangle
+
+
+def is_detection_in_roi(
+    detection: dict,
+    frame_width: int,
+    frame_height: int,
+    margin_top: int = DEFAULT_ROI_MARGIN_TOP,
+    margin_bottom: int = DEFAULT_ROI_MARGIN_BOTTOM,
+    margin_left: int = DEFAULT_ROI_MARGIN_LEFT,
+    margin_right: int = DEFAULT_ROI_MARGIN_RIGHT,
+) -> bool:
+    """
+    Check if a detection's center is within the valid ROI.
+    """
+    bbox_center = detection.get("bbox_center", {})
+    x = bbox_center.get("x", 0)
+    y = bbox_center.get("y", 0)
+
+    roi_left = margin_left
+    roi_right = frame_width - margin_right
+    roi_top = margin_top
+    roi_bottom = frame_height - margin_bottom
+
+    return roi_left <= x <= roi_right and roi_top <= y <= roi_bottom
 
 
 def send_video_to_api(
@@ -447,6 +478,8 @@ def overlay_tracking_results(
     display: bool = True,
     playback_speed: float = 1.0,
     overcrowding_threshold: int = None,
+    show_roi: bool = True,
+    filter_by_roi: bool = True,
 ) -> str:
     """
     Overlay tracking results on the video and optionally display/save it.
@@ -458,6 +491,8 @@ def overlay_tracking_results(
         display: Whether to display the video in a window
         playback_speed: Playback speed multiplier (1.0 = normal, 2.0 = 2x speed)
         overcrowding_threshold: If set, highlight frames exceeding this count
+        show_roi: If True, draw a rectangle showing the valid ROI region
+        filter_by_roi: If True, only show detections within ROI
 
     Returns:
         Path to the saved output video (or None if not saved)
@@ -508,16 +543,24 @@ def overlay_tracking_results(
         timestamp = frame_data.get("timestamp_sec", 0)
         detection_count = len(detections)
 
-        # Check for overcrowding
-        is_overcrowded = (overcrowding_threshold and 
-                          detection_count > overcrowding_threshold)
+        # Draw ROI rectangle if enabled
+        if show_roi:
+            roi_x1 = DEFAULT_ROI_MARGIN_LEFT
+            roi_y1 = DEFAULT_ROI_MARGIN_TOP
+            roi_x2 = width - DEFAULT_ROI_MARGIN_RIGHT
+            roi_y2 = height - DEFAULT_ROI_MARGIN_BOTTOM
+            cv2.rectangle(frame, (roi_x1, roi_y1), (roi_x2, roi_y2), ROI_RECT_COLOR, 2)
+            cv2.putText(frame, "ROI", (roi_x1 + 5, roi_y1 + 20), 
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, ROI_RECT_COLOR, 1)
 
-        # Draw red border if overcrowded
-        if is_overcrowded:
-            cv2.rectangle(frame, (0, 0), (width-1, height-1), OVERCROWDING_COLOR, 10)
-
-        # Draw each detection
+        # Filter and draw each detection
+        filtered_count = 0
         for detection in detections:
+            # Filter by ROI if enabled
+            if filter_by_roi and not is_detection_in_roi(detection, width, height):
+                continue
+            
+            filtered_count += 1
             bbox = detection.get("bbox", {})
             track_id = detection.get("track_id")
             confidence = detection.get("confidence", 0)
@@ -527,8 +570,7 @@ def overlay_tracking_results(
             x2 = int(bbox.get("x2", 0))
             y2 = int(bbox.get("y2", 0))
 
-            box_color = OVERCROWDING_COLOR if is_overcrowded else BOX_COLOR
-            cv2.rectangle(frame, (x1, y1), (x2, y2), box_color, 2)
+            cv2.rectangle(frame, (x1, y1), (x2, y2), BOX_COLOR, 2)
 
             if track_id is not None:
                 label = f"ID:{track_id} ({confidence:.2f})"
@@ -542,12 +584,11 @@ def overlay_tracking_results(
                 label, font, font_scale, thickness
             )
 
-            bg_color = OVERCROWDING_COLOR if is_overcrowded else TEXT_BG_COLOR
             cv2.rectangle(
                 frame,
                 (x1, y1 - text_height - 10),
                 (x1 + text_width + 10, y1),
-                bg_color,
+                TEXT_BG_COLOR,
                 -1,
             )
 
@@ -561,10 +602,9 @@ def overlay_tracking_results(
                 thickness,
             )
 
-        # Draw frame info
-        info_text = f"Frame: {frame_number}/{total_frames} | Time: {timestamp:.2f}s | Count: {detection_count}"
-        if is_overcrowded:
-            info_text += " | ⚠️ OVERCROWDED"
+        # Draw frame info (use filtered count if filtering)
+        display_count = filtered_count if filter_by_roi else detection_count
+        info_text = f"Frame: {frame_number}/{total_frames} | Time: {timestamp:.2f}s | Count: {display_count}"
         cv2.putText(frame, info_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7,
                     FRAME_INFO_COLOR, 2)
 
